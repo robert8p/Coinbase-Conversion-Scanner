@@ -41,6 +41,8 @@ class Settings:
     train_lookback_days: int
     train_max_symbols: int
     min_bars_5m: int
+    scan_lookback_days: int
+    scan_symbol_batch_size: int
 
     coinbase_api_base: str
     coinbase_max_products: int
@@ -81,6 +83,8 @@ class Settings:
             train_lookback_days=max(10, _int("TRAIN_LOOKBACK_DAYS", 60)),
             train_max_symbols=max(0, _int("TRAIN_MAX_SYMBOLS", 0)),
             min_bars_5m=max(120, _int("MIN_BARS_5M", 360)),
+            scan_lookback_days=max(2, _int("SCAN_LOOKBACK_DAYS", 8)),
+            scan_symbol_batch_size=max(10, _int("SCAN_SYMBOL_BATCH_SIZE", 60)),
 
             coinbase_api_base=os.getenv("COINBASE_API_BASE", "https://api.exchange.coinbase.com"),
             coinbase_max_products=max(50, _int("COINBASE_MAX_PRODUCTS", 400)),

@@ -23,6 +23,8 @@ FastAPI scanner for **Coinbase-tradeable spot crypto** with a single target:
 - `DEMO_MODE` (`true/false`)
 - `DISABLE_SCHEDULER` (`true/false`)
 - `SCAN_INTERVAL_MINUTES` (default `5`)
+- `SCAN_LOOKBACK_DAYS` (default `8`)
+- `SCAN_SYMBOL_BATCH_SIZE` (default `60`, lowers memory pressure when scanning all symbols)
 - `ADMIN_PASSWORD` (required for `/train`)
 - `TRAIN_LOOKBACK_DAYS` (default `60`)
 - `TRAIN_MAX_SYMBOLS` (default `0`, all)
@@ -46,6 +48,7 @@ FastAPI scanner for **Coinbase-tradeable spot crypto** with a single target:
 ## Train
 - In UI, enter `ADMIN_PASSWORD` and click **Start training**.
 - Training builds **only `pt2`** artifacts into `MODEL_DIR/pt2/bundle.joblib`.
+- For large universes, temporarily set `DISABLE_SCHEDULER=true` while training to reduce memory/CPU contention.
 
 ## API
 - `GET /`

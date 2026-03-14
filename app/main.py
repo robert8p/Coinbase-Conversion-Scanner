@@ -28,10 +28,21 @@ def get_settings() -> Settings:
     return SETTINGS
 
 
+def _initial_scan_thread() -> None:
+    try:
+        SCANNER.scan_once(datetime.now(timezone.utc))
+    except Exception as e:
+        STATE.set_error(f"Initial scan failed: {e}")
+
+
 @app.on_event("startup")
 def _startup() -> None:
     os.makedirs(os.path.join(SETTINGS.model_dir, "pt2"), exist_ok=True)
     SCANNER.load_constituents()
+    with STATE.lock:
+        if not STATE.data_source.last_request_utc:
+            STATE.data_source.message = "Initialized; waiting for first scan"
+            STATE.data_source.ok = False
     last = load_training_last(SETTINGS.model_dir)
     if last:
         with STATE.lock:
@@ -49,6 +60,7 @@ def _startup() -> None:
             STATE.model.pt2.brier_val = meta.get("brier_val")
             STATE.model.pt2.calibrator = "isotonic"
     SCANNER.start()
+    threading.Thread(target=_initial_scan_thread, daemon=True).start()
 
 
 @app.get("/health")
@@ -64,6 +76,11 @@ def dashboard(request: Request):
 @app.get("/api/status")
 def api_status(settings: Settings = Depends(get_settings)) -> Dict[str, Any]:
     snap = STATE.snapshot_status()
+    if not snap.get("last_run_utc") and not settings.demo_mode:
+        ds = snap.get("data_source", {})
+        if ds.get("message") in (None, "Not checked"):
+            ds["message"] = "Waiting for first scan to complete"
+            snap["data_source"] = ds
     snap["demo_mode"] = settings.demo_mode
     snap["scan_interval_minutes"] = settings.scan_interval_minutes
     snap["model_dir"] = settings.model_dir

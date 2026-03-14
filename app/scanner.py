@@ -1,4 +1,8 @@
 from __future__ import annotations
+import threading
+from collections import Counter
+from datetime import datetime, timedelta, timezone
+from typing import Dict, List, Set
 import os
 import threading
 from collections import Counter
@@ -31,12 +35,20 @@ class Scanner:
         found, err = discover_coinbase_products(self.settings.coinbase_api_base, self.settings.quote_currencies)
         if not found:
             found = load_fallback()
+        exclusions: Set[str] = set(self.settings.universe_exclude_symbols)
+        eligible = [c for c in found if c.listing_age_days >= self.settings.min_listing_days and c.symbol not in exclusions]
+        max_pool = max(1, min(self.settings.coinbase_max_products, len(eligible)))
+        if self.settings.universe_mode == "top_n":
+            max_pool = max(1, min(max_pool, self.settings.universe_top_n))
+        self.constituents = eligible[:max_pool]
         filt = [c for c in found if c.listing_age_days >= self.settings.min_listing_days and c.symbol not in set(self.settings.universe_exclude_symbols)]
         self.constituents = filt[:self.settings.coinbase_max_products]
         with self.state.lock:
             self.state.constituents.source = "coinbase" if err is None else "fallback"
             self.state.constituents.warning = err
             self.state.constituents.count = len(self.constituents)
+            self.state.coverage.universe_count = len(self.constituents)
+            self.state.coverage.symbols_requested_count = len(self.constituents)
 
     def start(self) -> None:
         if self.settings.disable_scheduler:
@@ -85,6 +97,10 @@ class Scanner:
 
         client = CoinbaseClient(base_url=self.settings.coinbase_api_base)
         start = now_utc - timedelta(days=8)
+        with self.state.lock:
+            self.state.data_source.message = f"Scanning {len(universe)} symbols..."
+            self.state.data_source.last_request_utc = run_utc
+            self.state.data_source.ok = False
         bars_by_sym, err, warn = client.get_bars(universe, start, now_utc, granularity_s=300)
         with self.state.lock:
             self.state.data_source.ok = len(bars_by_sym) > 0

@@ -83,4 +83,33 @@ class CoinbaseClient:
                     err_any = err_any or f"{sym}: {err}"
                 if bars:
                     out[sym] = bars
+        return None, err, warn
+
+    def get_bars(self, symbols: List[str], start_utc: datetime, end_utc: datetime, granularity_s: int = 300) -> Tuple[Dict[str, List[dict]], Optional[str], Optional[str]]:
+        out: Dict[str, List[dict]] = {}
+        warn_any = None
+        err_any = None
+        max_chunk = timedelta(seconds=granularity_s * 300)
+        for sym in symbols:
+            bars: List[dict] = []
+            chunk_start = start_utc
+            while chunk_start < end_utc:
+                chunk_end = min(end_utc, chunk_start + max_chunk)
+                params = {"start": _to_iso(chunk_start), "end": _to_iso(chunk_end), "granularity": str(granularity_s)}
+                js, err, warn = self._get(f"/products/{sym}/candles", params)
+                if warn:
+                    warn_any = warn_any or warn
+                if err:
+                    err_any = err_any or err
+                    break
+                if isinstance(js, list):
+                    for c in js:
+                        if isinstance(c, list) and len(c) >= 6:
+                            ts = datetime.fromtimestamp(int(c[0]), tz=timezone.utc).isoformat().replace("+00:00", "Z")
+                            bars.append({"t": ts, "o": float(c[3]), "h": float(c[2]), "l": float(c[1]), "c": float(c[4]), "v": float(c[5])})
+                chunk_start = chunk_end
+                time.sleep(0.01)
+            if bars:
+                bars.sort(key=lambda x: x["t"])
+                out[sym] = bars
         return out, err_any, warn_any

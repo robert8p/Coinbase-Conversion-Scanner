@@ -3,6 +3,19 @@ import threading
 from collections import Counter
 from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Set
+import threading
+from collections import Counter
+from datetime import datetime, timedelta, timezone
+from typing import Dict, List, Set
+import threading
+from collections import Counter
+from datetime import datetime, timedelta, timezone
+from typing import Dict, List, Set
+import os
+import threading
+from collections import Counter
+from datetime import datetime, timedelta, timezone
+from typing import Dict, List
 
 import numpy as np
 
@@ -40,6 +53,8 @@ class Scanner:
         if self.settings.universe_mode == "top_n":
             max_pool = max(1, min(max_pool, self.settings.universe_top_n))
         self.constituents = eligible[:max_pool]
+        filt = [c for c in found if c.listing_age_days >= self.settings.min_listing_days and c.symbol not in set(self.settings.universe_exclude_symbols)]
+        self.constituents = filt[:self.settings.coinbase_max_products]
         with self.state.lock:
             self.state.constituents.source = "coinbase" if err is None else "fallback"
             self.state.constituents.warning = err
@@ -146,6 +161,45 @@ class Scanner:
             self.state.data_source.message = any_err or "OK"
             self.state.data_source.last_request_utc = run_utc
             self.state.data_source.rate_limit_warn = any_warn
+        client = CoinbaseClient(base_url=self.settings.coinbase_api_base)
+        start = now_utc - timedelta(days=8)
+        with self.state.lock:
+            self.state.data_source.message = f"Scanning {len(universe)} symbols..."
+            self.state.data_source.last_request_utc = run_utc
+            self.state.data_source.ok = False
+        bars_by_sym, err, warn = client.get_bars(universe, start, now_utc, granularity_s=300)
+        with self.state.lock:
+            self.state.data_source.ok = len(bars_by_sym) > 0
+            self.state.data_source.message = err or "OK"
+            self.state.data_source.last_request_utc = run_utc
+            self.state.data_source.rate_limit_warn = warn
+
+        btc = bars_by_sym.get("BTC-USD", [])
+        eth = bars_by_sym.get("ETH-USD", [])
+        skipped: List[SkippedSymbol] = []
+        feat_rows, symbols, prices = [], [], []
+        for sym in universe:
+            bars = bars_by_sym.get(sym, [])
+            if not bars:
+                skipped.append(SkippedSymbol(sym, "no_bars"))
+                continue
+            cov.symbols_returned_with_bars_count += 1
+            if len(bars) < self.settings.min_bars_5m:
+                skipped.append(SkippedSymbol(sym, "insufficient_bars", bars[-1]["t"]))
+                continue
+            cov.symbols_with_sufficient_bars_count += 1
+            try:
+                f = compute_features_from_5m(bars, btc_bars=btc, eth_bars=eth)
+            except Exception:
+                skipped.append(SkippedSymbol(sym, "feature_error", bars[-1]["t"]))
+                continue
+            if f["dollar_volume"] < self.settings.min_rolling_dollar_volume:
+                skipped.append(SkippedSymbol(sym, "illiquid", bars[-1]["t"]))
+                continue
+            feat_rows.append([f[k] for k in FEATURE_NAMES])
+            symbols.append(sym)
+            prices.append(float(bars[-1]["c"]))
+            self.state.data_source.last_bar_timestamp = bars[-1]["t"]
 
         if not feat_rows:
             cov.top_skip_reasons = dict(Counter([s.reason for s in skipped]).most_common(8))

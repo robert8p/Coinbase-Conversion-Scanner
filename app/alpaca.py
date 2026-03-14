@@ -1,137 +1,86 @@
 from __future__ import annotations
-import re
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Dict, List, Optional, Tuple
 
 import requests
 
-def normalize_symbol(sym: str) -> str:
-    s = (sym or "").strip().upper()
-    if not s:
-        return s
-    if "-" in s and s.count("-")==1:
-        left,right = s.split("-",1)
-        if left and len(right)==1 and right.isalnum():
-            return f"{left}.{right}"
-    return s
 
-def _extract_invalid_symbol(err_text: str) -> Optional[str]:
-    if not err_text:
-        return None
-    m = re.search(r'invalid symbol\\s*:\\s*([^"\\s}]+)', err_text, flags=re.IGNORECASE)
-    return m.group(1).strip() if m else None
+def _to_iso(dt: datetime) -> str:
+    return dt.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
 
-def _to_utc_iso(dt: datetime) -> str:
-    return dt.replace(tzinfo=timezone.utc).isoformat().replace("+00:00","Z")
 
 @dataclass
-class AlpacaClient:
-    api_key: str
-    api_secret: str
-    feed: str = "sip"
-    base_url: str = "https://data.alpaca.markets"
+class CoinbaseClient:
+    base_url: str = "https://api.exchange.coinbase.com"
+    max_workers: int = 12
 
-    def _headers(self) -> Dict[str,str]:
-        return {"APCA-API-KEY-ID": self.api_key, "APCA-API-SECRET-KEY": self.api_secret}
-
-    def _get(self, path: str, params: Dict[str,str], timeout_s: int=25) -> Tuple[Optional[dict], Optional[str], Optional[str]]:
+    def _get(self, path: str, params: Dict[str, str], timeout_s: int = 20) -> Tuple[Optional[object], Optional[str], Optional[str]]:
         url = self.base_url.rstrip("/") + path
-        backoff = 1.0
+        backoff = 0.6
         warn = None
-        last_err = None
+        err = None
         for _ in range(6):
             try:
-                r = requests.get(url, headers=self._headers(), params=params, timeout=timeout_s)
+                r = requests.get(url, params=params, timeout=timeout_s, headers={"User-Agent": "coinbase-crypto-prob-scanner/1.0"})
                 if r.status_code == 429:
-                    warn = "HTTP 429 rate-limited; backing off"
+                    warn = "HTTP 429 rate-limited; retrying"
                     time.sleep(backoff)
-                    backoff = min(30.0, backoff*2)
+                    backoff = min(10.0, backoff * 1.8)
                     continue
                 if r.status_code >= 400:
-                    return None, f"HTTP {r.status_code}: {r.text[:400]}", warn
+                    return None, f"HTTP {r.status_code}: {r.text[:300]}", warn
                 return r.json(), None, warn
             except Exception as e:
-                last_err = str(e)
+                err = str(e)
                 time.sleep(backoff)
-                backoff = min(30.0, backoff*2)
-        return None, last_err or "request failed", warn
+                backoff = min(10.0, backoff * 1.8)
+        return None, err or "request failed", warn
 
-    def get_bars(self, symbols: List[str], timeframe: str, start_utc: Optional[datetime]=None, end_utc: Optional[datetime]=None, limit: Optional[int]=None, adjustment: str="raw") -> Tuple[Dict[str, List[dict]], Optional[str], Optional[str]]:
-        if not symbols:
-            return {}, None, None
-        symbols = [normalize_symbol(s) for s in symbols if s and str(s).strip()]
-        seen=set(); symbols=[s for s in symbols if not (s in seen or seen.add(s))]
-        params: Dict[str,str] = {"timeframe": timeframe, "feed": (self.feed or "sip").lower(), "adjustment": adjustment}
-        if start_utc is not None:
-            params["start"] = _to_utc_iso(start_utc)
-        if end_utc is not None:
-            params["end"] = _to_utc_iso(end_utc)
-        per_page_limit = limit if limit is not None else 10000
-        params["limit"] = str(max(1, min(int(per_page_limit), 10000)))
-        out: Dict[str, List[dict]] = {}
-        chunk_size = 200
+    def _fetch_symbol_bars(self, sym: str, start_utc: datetime, end_utc: datetime, granularity_s: int) -> Tuple[str, List[dict], Optional[str], Optional[str]]:
+        bars: List[dict] = []
         err_any = None
         warn_any = None
-
-        def _fetch_chunk(chunk: List[str]) -> Tuple[Dict[str, List[dict]], Optional[str], Optional[str]]:
-            nonlocal err_any, warn_any
-            retry_chunk = list(chunk)
-            max_pages = 100
-            while retry_chunk:
-                params["symbols"] = ",".join(retry_chunk)
-                page_token: Optional[str] = None
-                pages = 0
-                merged: Dict[str, List[dict]] = {}
-                while True:
-                    if page_token:
-                        params["page_token"] = page_token
-                    else:
-                        params.pop("page_token", None)
-                    js, err, warn = self._get("/v2/stocks/bars", params=params)
-                    if warn:
-                        warn_any = warn_any or warn
-                    if err:
-                        err_any = err
-                        bad = _extract_invalid_symbol(err)
-                        if bad and bad in retry_chunk and len(retry_chunk) > 1:
-                            retry_chunk.remove(bad)
-                            merged = {}
-                            page_token = None
-                            break
-                        return {}, err, warn_any
-                    bars = js.get("bars", {}) if isinstance(js, dict) else {}
-                    for sym, lst in bars.items():
-                        if lst:
-                            merged.setdefault(sym, []).extend(lst)
-                    page_token = js.get("next_page_token") if isinstance(js, dict) else None
-                    pages += 1
-                    if not page_token:
-                        return merged, None, warn_any
-                    if pages >= max_pages:
-                        warn_any = warn_any or "pagination chunk split used"
-                        if len(retry_chunk) <= 1:
-                            return merged, None, warn_any
-                        mid = max(1, len(retry_chunk) // 2)
-                        left, err_l, warn_l = _fetch_chunk(retry_chunk[:mid])
-                        right, err_r, warn_r = _fetch_chunk(retry_chunk[mid:])
-                        combined: Dict[str, List[dict]] = {}
-                        for src in (left, right):
-                            for sym, lst in src.items():
-                                combined.setdefault(sym, []).extend(lst)
-                        return combined, err_l or err_r, warn_l or warn_r
-                if merged:
-                    return merged, None, warn_any
-            return {}, err_any, warn_any
-
-        for i in range(0, len(symbols), chunk_size):
-            chunk = symbols[i:i+chunk_size]
-            merged, err, warn = _fetch_chunk(chunk)
+        max_chunk = timedelta(seconds=granularity_s * 300)
+        chunk_start = start_utc
+        while chunk_start < end_utc:
+            chunk_end = min(end_utc, chunk_start + max_chunk)
+            params = {"start": _to_iso(chunk_start), "end": _to_iso(chunk_end), "granularity": str(granularity_s)}
+            js, err, warn = self._get(f"/products/{sym}/candles", params)
             if warn:
                 warn_any = warn_any or warn
-            if err and not err_any:
-                err_any = err
-            for sym, lst in merged.items():
-                out[sym] = lst
+            if err:
+                err_any = err_any or err
+                break
+            if isinstance(js, list):
+                for c in js:
+                    if isinstance(c, list) and len(c) >= 6:
+                        ts = datetime.fromtimestamp(int(c[0]), tz=timezone.utc).isoformat().replace("+00:00", "Z")
+                        bars.append({"t": ts, "o": float(c[3]), "h": float(c[2]), "l": float(c[1]), "c": float(c[4]), "v": float(c[5])})
+            chunk_start = chunk_end
+            time.sleep(0.005)
+        if bars:
+            bars.sort(key=lambda x: x["t"])
+        return sym, bars, err_any, warn_any
+
+    def get_bars(self, symbols: List[str], start_utc: datetime, end_utc: datetime, granularity_s: int = 300) -> Tuple[Dict[str, List[dict]], Optional[str], Optional[str]]:
+        out: Dict[str, List[dict]] = {}
+        warn_any = None
+        err_any = None
+        if not symbols:
+            return out, None, None
+
+        workers = max(1, min(self.max_workers, len(symbols)))
+        with ThreadPoolExecutor(max_workers=workers) as ex:
+            futs = [ex.submit(self._fetch_symbol_bars, sym, start_utc, end_utc, granularity_s) for sym in symbols]
+            for fut in as_completed(futs):
+                sym, bars, err, warn = fut.result()
+                if warn:
+                    warn_any = warn_any or warn
+                if err:
+                    err_any = err_any or f"{sym}: {err}"
+                if bars:
+                    out[sym] = bars
         return out, err_any, warn_any

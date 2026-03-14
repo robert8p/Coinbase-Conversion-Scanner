@@ -1,13 +1,10 @@
 from __future__ import annotations
-import csv
-import os
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import List, Optional, Tuple
 
 import requests
 
-FALLBACK_CSV_PATH = os.path.join(os.path.dirname(__file__), "data", "sp500_fallback.csv")
-WIKI_URL = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
 
 @dataclass
 class Constituent:
@@ -15,79 +12,57 @@ class Constituent:
     name: str
     sector: str
     industry: str
+    listing_age_days: int = 9999
 
-def normalize_symbol(sym: str) -> str:
-    s = (sym or "").strip().upper()
-    if not s:
-        return s
-    if "-" in s and s.count("-")==1:
-        left,right = s.split("-",1)
-        if left and len(right)==1 and right.isalnum():
-            return f"{left}.{right}"
-    return s
 
-def load_fallback() -> List[Constituent]:
-    out: List[Constituent] = []
-    if not os.path.exists(FALLBACK_CSV_PATH):
-        return out
-    with open(FALLBACK_CSV_PATH, "r", encoding="utf-8") as f:
-        reader = csv.DictReader(f)
-        for row in reader:
-            sym = (row.get("Symbol") or row.get("symbol") or "").strip()
-            if not sym:
-                continue
-            out.append(Constituent(
-                symbol=normalize_symbol(sym),
-                name=(row.get("Name") or row.get("Security") or row.get("name") or sym).strip(),
-                sector=(row.get("Sector") or row.get("GICS Sector") or row.get("sector") or "Unknown").strip(),
-                industry=(row.get("Industry") or row.get("GICS Sub-Industry") or row.get("industry") or "").strip(),
-            ))
-    return out
+def _lev_or_synth(base: str) -> bool:
+    x = base.upper()
+    bad = ["UP", "DOWN", "BULL", "BEAR", "3L", "3S", "5L", "5S", "LEV", "INDEX"]
+    return any(t in x for t in bad)
 
-def try_refresh_from_wikipedia(timeout_s: int=8) -> Tuple[Optional[List[Constituent]], Optional[str]]:
+
+def discover_coinbase_products(base_url: str, quote_currencies: List[str], timeout_s: int = 15) -> Tuple[Optional[List[Constituent]], Optional[str]]:
+    url = base_url.rstrip("/") + "/products"
     try:
-        import pandas as pd
-        from io import StringIO
-        resp = requests.get(WIKI_URL, timeout=timeout_s, headers={"User-Agent":"sp500-prob-scanner/1.0"})
-        resp.raise_for_status()
-        tables = pd.read_html(StringIO(resp.text))
-        if not tables:
-            return None, "no tables found"
-        df = tables[0]
-        cols = [str(c).lower() for c in df.columns]
-        sym_col = df.columns[0]
-        for c in ["symbol","ticker symbol","ticker"]:
-            if c in cols:
-                sym_col = df.columns[cols.index(c)]
-                break
-        sec_col = None
-        for c in ["security","name"]:
-            if c in cols:
-                sec_col = df.columns[cols.index(c)]
-                break
-        sector_col = None
-        for c in ["gics sector","sector"]:
-            if c in cols:
-                sector_col = df.columns[cols.index(c)]
-                break
-        ind_col = None
-        for c in ["gics sub-industry","sub-industry","industry"]:
-            if c in cols:
-                ind_col = df.columns[cols.index(c)]
-                break
+        r = requests.get(url, timeout=timeout_s, headers={"User-Agent": "coinbase-crypto-prob-scanner/1.0"})
+        r.raise_for_status()
+        rows = r.json()
         out: List[Constituent] = []
-        for _, r in df.iterrows():
-            sym = str(r.get(sym_col,"")).strip()
-            if not sym or sym.lower()=="nan":
+        now = datetime.now(timezone.utc)
+        for p in rows:
+            if not isinstance(p, dict):
                 continue
-            out.append(Constituent(
-                symbol=normalize_symbol(sym),
-                name=str(r.get(sec_col, sym)).strip() if sec_col is not None else sym,
-                sector=str(r.get(sector_col, "Unknown")).strip() if sector_col is not None else "Unknown",
-                industry=str(r.get(ind_col, "")).strip() if ind_col is not None else "",
-            ))
-        if len(out) < 400:
-            return None, f"refresh produced too few rows ({len(out)})"
+            quote = str(p.get("quote_currency", "")).upper()
+            if quote not in {q.upper() for q in quote_currencies}:
+                continue
+            if not p.get("id") or not p.get("base_currency"):
+                continue
+            if str(p.get("status", "")).lower() not in {"online", "active"}:
+                continue
+            if bool(p.get("trading_disabled")):
+                continue
+            if bool(p.get("cancel_only")) or bool(p.get("post_only")) or bool(p.get("auction_mode")):
+                continue
+            base = str(p.get("base_currency")).upper()
+            if _lev_or_synth(base):
+                continue
+            age = 9999
+            created_at = p.get("created_at")
+            if created_at:
+                try:
+                    t = datetime.fromisoformat(str(created_at).replace("Z", "+00:00"))
+                    age = max(1, int((now - t).total_seconds() // 86400))
+                except Exception:
+                    pass
+            out.append(Constituent(symbol=str(p.get("id")).upper(), name=f"{base}/{quote}", sector="CRYPTO", industry="SPOT", listing_age_days=age))
+        if len(out) < 10:
+            return None, f"too few eligible Coinbase products: {len(out)}"
         return out, None
     except Exception as e:
         return None, str(e)
+
+
+def load_fallback() -> List[Constituent]:
+    # Minimal demo-safe fallback.
+    syms = ["BTC-USD", "ETH-USD", "SOL-USD", "AVAX-USD", "LINK-USD", "MATIC-USD"]
+    return [Constituent(symbol=s, name=s, sector="CRYPTO", industry="SPOT") for s in syms]

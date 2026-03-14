@@ -3,6 +3,11 @@ import threading
 from collections import Counter
 from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Set
+import os
+import threading
+from collections import Counter
+from datetime import datetime, timedelta, timezone
+from typing import Dict, List
 
 import numpy as np
 
@@ -36,6 +41,8 @@ class Scanner:
         if self.settings.universe_mode == "top_n":
             max_pool = max(1, min(max_pool, self.settings.universe_top_n))
         self.constituents = eligible[:max_pool]
+        filt = [c for c in found if c.listing_age_days >= self.settings.min_listing_days and c.symbol not in set(self.settings.universe_exclude_symbols)]
+        self.constituents = filt[:self.settings.coinbase_max_products]
         with self.state.lock:
             self.state.constituents.source = "coinbase" if err is None else "fallback"
             self.state.constituents.warning = err

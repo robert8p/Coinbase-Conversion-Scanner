@@ -29,6 +29,8 @@ FastAPI scanner for **Coinbase-tradeable spot crypto** with a single target:
 
 ## Universe/config env vars
 - `COINBASE_API_BASE` (default `https://api.exchange.coinbase.com`)
+- `COINBASE_MAX_PRODUCTS` (default `400`)
+- `COINBASE_FETCH_WORKERS` (default `12`, concurrent symbol fetch workers)
 - `COINBASE_QUOTE_CURRENCIES` (default `USD,USDC`)
 - `UNIVERSE_MODE` (`all`, `top_n`, `all_plus_top_n`; default `top_n`)
 - `UNIVERSE_TOP_N` (default `120`)

@@ -3,6 +3,10 @@ import threading
 from collections import Counter
 from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Set
+import threading
+from collections import Counter
+from datetime import datetime, timedelta, timezone
+from typing import Dict, List, Set
 import os
 import threading
 from collections import Counter
@@ -95,6 +99,7 @@ class Scanner:
             self.state.set_coverage(cov, [])
             return
 
+        client = CoinbaseClient(base_url=self.settings.coinbase_api_base, max_workers=self.settings.coinbase_fetch_workers)
         client = CoinbaseClient(base_url=self.settings.coinbase_api_base)
         start = now_utc - timedelta(days=8)
         with self.state.lock:

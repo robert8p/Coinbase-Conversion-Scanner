@@ -44,6 +44,7 @@ class Settings:
 
     coinbase_api_base: str
     coinbase_max_products: int
+    coinbase_fetch_workers: int
     quote_currencies: List[str]
     universe_mode: str
     universe_top_n: int
@@ -83,6 +84,7 @@ class Settings:
 
             coinbase_api_base=os.getenv("COINBASE_API_BASE", "https://api.exchange.coinbase.com"),
             coinbase_max_products=max(50, _int("COINBASE_MAX_PRODUCTS", 400)),
+            coinbase_fetch_workers=max(1, _int("COINBASE_FETCH_WORKERS", 12)),
             quote_currencies=_csv("COINBASE_QUOTE_CURRENCIES", "USD,USDC"),
             universe_mode=os.getenv("UNIVERSE_MODE", "top_n").strip().lower(),
             universe_top_n=max(20, _int("UNIVERSE_TOP_N", 120)),
